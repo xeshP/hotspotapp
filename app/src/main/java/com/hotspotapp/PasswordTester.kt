@@ -9,7 +9,6 @@ import android.net.wifi.WifiNetworkSpecifier
 import android.os.Handler
 import android.os.Looper
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.Channel
 
 sealed class TestResult {
     data class Success(val password: String) : TestResult()
@@ -20,11 +19,14 @@ sealed class TestResult {
 
 class PasswordTester(private val context: Context) {
 
+    companion object {
+        private const val CONNECTION_TIMEOUT_MS = 4000L // 4 seconds per attempt
+    }
+
     private val connectivityManager: ConnectivityManager =
         context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
     private var currentCallback: ConnectivityManager.NetworkCallback? = null
-    private var testingJob: Job? = null
     private var isCancelled = false
 
     suspend fun testPasswords(
@@ -46,7 +48,7 @@ class PasswordTester(private val context: Context) {
                 onResult(TestResult.Progress(password, index + 1, passwords.size))
             }
 
-            val success = tryConnect(network.ssid, password)
+            val success = tryConnect(network.ssid, network.securityType, password)
 
             if (success) {
                 withContext(Dispatchers.Main) {
@@ -54,6 +56,9 @@ class PasswordTester(private val context: Context) {
                 }
                 return@withContext
             }
+
+            // Small delay between attempts to avoid rate limiting
+            delay(100)
         }
 
         if (!isCancelled) {
@@ -63,16 +68,23 @@ class PasswordTester(private val context: Context) {
         }
     }
 
-    private suspend fun tryConnect(ssid: String, password: String): Boolean = suspendCancellableCoroutine { continuation ->
-        val specifier = WifiNetworkSpecifier.Builder()
+    private suspend fun tryConnect(ssid: String, securityType: String, password: String): Boolean =
+        suspendCancellableCoroutine { continuation ->
+
+        val specifierBuilder = WifiNetworkSpecifier.Builder()
             .setSsid(ssid)
-            .setWpa2Passphrase(password)
-            .build()
+
+        // Set password based on security type
+        when {
+            securityType.contains("WPA3") -> specifierBuilder.setWpa3Passphrase(password)
+            securityType.contains("WPA2") || securityType.contains("WPA") -> specifierBuilder.setWpa2Passphrase(password)
+            else -> specifierBuilder.setWpa2Passphrase(password)
+        }
 
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .setNetworkSpecifier(specifier)
+            .setNetworkSpecifier(specifierBuilder.build())
             .build()
 
         val handler = Handler(Looper.getMainLooper())
@@ -82,8 +94,9 @@ class PasswordTester(private val context: Context) {
             override fun onAvailable(network: Network) {
                 if (!isResumed) {
                     isResumed = true
-                    // Disconnect after successful test
-                    connectivityManager.unregisterNetworkCallback(this)
+                    try {
+                        connectivityManager.unregisterNetworkCallback(this)
+                    } catch (_: Exception) {}
                     continuation.resume(true) {}
                 }
             }
@@ -91,6 +104,19 @@ class PasswordTester(private val context: Context) {
             override fun onUnavailable() {
                 if (!isResumed) {
                     isResumed = true
+                    try {
+                        connectivityManager.unregisterNetworkCallback(this)
+                    } catch (_: Exception) {}
+                    continuation.resume(false) {}
+                }
+            }
+
+            override fun onLost(network: Network) {
+                if (!isResumed) {
+                    isResumed = true
+                    try {
+                        connectivityManager.unregisterNetworkCallback(this)
+                    } catch (_: Exception) {}
                     continuation.resume(false) {}
                 }
             }
@@ -98,21 +124,19 @@ class PasswordTester(private val context: Context) {
 
         currentCallback = callback
 
-        // Timeout after 15 seconds
+        // Faster timeout
         handler.postDelayed({
             if (!isResumed) {
                 isResumed = true
                 try {
                     connectivityManager.unregisterNetworkCallback(callback)
-                } catch (e: Exception) {
-                    // Callback may already be unregistered
-                }
+                } catch (_: Exception) {}
                 continuation.resume(false) {}
             }
-        }, 15000)
+        }, CONNECTION_TIMEOUT_MS)
 
         try {
-            connectivityManager.requestNetwork(request, callback, handler, 15000)
+            connectivityManager.requestNetwork(request, callback, handler, CONNECTION_TIMEOUT_MS.toInt())
         } catch (e: Exception) {
             if (!isResumed) {
                 isResumed = true
@@ -124,9 +148,7 @@ class PasswordTester(private val context: Context) {
             if (!isResumed) {
                 try {
                     connectivityManager.unregisterNetworkCallback(callback)
-                } catch (e: Exception) {
-                    // Callback may already be unregistered
-                }
+                } catch (_: Exception) {}
             }
         }
     }
@@ -136,11 +158,8 @@ class PasswordTester(private val context: Context) {
         currentCallback?.let {
             try {
                 connectivityManager.unregisterNetworkCallback(it)
-            } catch (e: Exception) {
-                // Callback may already be unregistered
-            }
+            } catch (_: Exception) {}
         }
         currentCallback = null
-        testingJob?.cancel()
     }
 }
