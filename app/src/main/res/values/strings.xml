@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HotspotApp</string>
+    <string name="scan_networks">Scan Networks</string>
+    <string name="load_passwords">Load Password File</string>
+    <string name="start_testing">Start Testing</string>
+    <string name="stop_testing">Stop Testing</string>
+    <string name="no_networks">No networks found</string>
+    <string name="no_passwords">No password file loaded</string>
+</resources>
