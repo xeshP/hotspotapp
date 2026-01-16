@@ -83,7 +83,7 @@ class PasswordTester(private val context: Context) {
             .build()
 
         val handler = Handler(Looper.getMainLooper())
-        @Volatile var isResumed = false
+        var isResumed = false
 
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
