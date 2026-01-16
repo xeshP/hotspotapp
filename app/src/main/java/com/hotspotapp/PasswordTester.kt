@@ -8,7 +8,11 @@ import android.net.NetworkRequest
 import android.net.wifi.WifiNetworkSpecifier
 import android.os.Handler
 import android.os.Looper
-import kotlinx.coroutines.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
 
 sealed class TestResult {
     data class Success(val password: String) : TestResult()
@@ -97,7 +101,7 @@ class PasswordTester(private val context: Context) {
                 if (!isResumed) {
                     isResumed = true
                     cleanup(this)
-                    continuation.resume(true) {}
+                    continuation.resume(true)
                 }
             }
 
@@ -106,7 +110,7 @@ class PasswordTester(private val context: Context) {
                 if (!isResumed) {
                     isResumed = true
                     cleanup(this)
-                    continuation.resume(false) {}
+                    continuation.resume(false)
                 }
             }
         }
@@ -118,7 +122,7 @@ class PasswordTester(private val context: Context) {
             if (!isResumed) {
                 isResumed = true
                 cleanup(callback)
-                continuation.resume(false) {}
+                continuation.resume(false)
             }
         }, CONNECTION_TIMEOUT_MS)
 
@@ -127,7 +131,7 @@ class PasswordTester(private val context: Context) {
         } catch (e: Exception) {
             if (!isResumed) {
                 isResumed = true
-                continuation.resume(false) {}
+                continuation.resume(false)
             }
         }
 
