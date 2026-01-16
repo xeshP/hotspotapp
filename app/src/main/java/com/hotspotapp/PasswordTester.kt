@@ -5,9 +5,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
-import android.net.wifi.WifiManager
-import android.net.wifi.WifiNetworkSuggestion
-import android.os.Build
+import android.net.wifi.WifiNetworkSpecifier
 import android.os.Handler
 import android.os.Looper
 import kotlinx.coroutines.*
@@ -17,21 +15,20 @@ sealed class TestResult {
     data class Progress(val currentPassword: String, val index: Int, val total: Int) : TestResult()
     object Failed : TestResult()
     object Cancelled : TestResult()
+    object WaitingForUser : TestResult()
 }
 
 class PasswordTester(private val context: Context) {
 
     companion object {
-        private const val CONNECTION_TIMEOUT_MS = 3000L
+        private const val CONNECTION_TIMEOUT_MS = 30000L // 30 sec - user needs to tap
     }
 
-    private val wifiManager: WifiManager =
-        context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
     private val connectivityManager: ConnectivityManager =
         context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
-    @Volatile private var isCancelled = false
     private var currentCallback: ConnectivityManager.NetworkCallback? = null
+    @Volatile private var isCancelled = false
 
     suspend fun testPasswords(
         network: WifiNetwork,
@@ -40,15 +37,11 @@ class PasswordTester(private val context: Context) {
     ) = withContext(Dispatchers.IO) {
         isCancelled = false
 
-        // Clear any previous suggestions
-        clearSuggestions()
-
         for ((index, password) in passwords.withIndex()) {
             if (isCancelled) {
                 withContext(Dispatchers.Main) {
                     onResult(TestResult.Cancelled)
                 }
-                clearSuggestions()
                 return@withContext
             }
 
@@ -56,17 +49,20 @@ class PasswordTester(private val context: Context) {
                 onResult(TestResult.Progress(password, index + 1, passwords.size))
             }
 
-            val success = tryConnectWithSuggestion(network.ssid, network.securityType, password)
+            val success = tryConnect(network.ssid, network.securityType, password)
 
             if (success) {
+                // Disconnect after finding password
+                disconnectNetwork()
                 withContext(Dispatchers.Main) {
                     onResult(TestResult.Success(password))
                 }
                 return@withContext
             }
-        }
 
-        clearSuggestions()
+            // Small delay between attempts
+            delay(200)
+        }
 
         if (!isCancelled) {
             withContext(Dispatchers.Main) {
@@ -75,88 +71,86 @@ class PasswordTester(private val context: Context) {
         }
     }
 
-    private suspend fun tryConnectWithSuggestion(ssid: String, securityType: String, password: String): Boolean {
-        // Remove previous suggestions first
-        clearSuggestions()
+    private suspend fun tryConnect(ssid: String, securityType: String, password: String): Boolean =
+        suspendCancellableCoroutine { continuation ->
 
-        // Create suggestion
-        val suggestionBuilder = WifiNetworkSuggestion.Builder()
+        val specifierBuilder = WifiNetworkSpecifier.Builder()
             .setSsid(ssid)
-            .setPriority(Int.MAX_VALUE)
 
         when {
-            securityType.contains("WPA3") -> suggestionBuilder.setWpa3Passphrase(password)
-            else -> suggestionBuilder.setWpa2Passphrase(password)
+            securityType.contains("WPA3") -> specifierBuilder.setWpa3Passphrase(password)
+            else -> specifierBuilder.setWpa2Passphrase(password)
         }
 
-        val suggestion = suggestionBuilder.build()
-        val suggestionsList = listOf(suggestion)
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .setNetworkSpecifier(specifierBuilder.build())
+            .build()
 
-        // Add suggestion
-        val status = wifiManager.addNetworkSuggestions(suggestionsList)
-        if (status != WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS) {
-            return false
-        }
-
-        // Wait and check if connected
-        return checkConnection(ssid)
-    }
-
-    private suspend fun checkConnection(targetSsid: String): Boolean = suspendCancellableCoroutine { continuation ->
         val handler = Handler(Looper.getMainLooper())
         var isResumed = false
-        var checkCount = 0
-        val maxChecks = 6 // Check 6 times over 3 seconds
 
-        val checkRunnable = object : Runnable {
-            override fun run() {
-                if (isResumed || isCancelled) return
-
-                val connectionInfo = wifiManager.connectionInfo
-                val connectedSsid = connectionInfo?.ssid?.replace("\"", "") ?: ""
-
-                if (connectedSsid == targetSsid) {
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                // SUCCESS - Password is correct!
+                if (!isResumed) {
                     isResumed = true
+                    cleanup(this)
                     continuation.resume(true) {}
-                    return
                 }
+            }
 
-                checkCount++
-                if (checkCount < maxChecks) {
-                    handler.postDelayed(this, 500)
-                } else {
-                    if (!isResumed) {
-                        isResumed = true
-                        continuation.resume(false) {}
-                    }
+            override fun onUnavailable() {
+                // FAILED - Wrong password or user declined
+                if (!isResumed) {
+                    isResumed = true
+                    cleanup(this)
+                    continuation.resume(false) {}
                 }
             }
         }
 
-        handler.post(checkRunnable)
+        currentCallback = callback
+
+        // Timeout
+        handler.postDelayed({
+            if (!isResumed) {
+                isResumed = true
+                cleanup(callback)
+                continuation.resume(false) {}
+            }
+        }, CONNECTION_TIMEOUT_MS)
+
+        try {
+            connectivityManager.requestNetwork(request, callback, handler, CONNECTION_TIMEOUT_MS.toInt())
+        } catch (e: Exception) {
+            if (!isResumed) {
+                isResumed = true
+                continuation.resume(false) {}
+            }
+        }
 
         continuation.invokeOnCancellation {
-            handler.removeCallbacks(checkRunnable)
+            if (!isResumed) {
+                cleanup(callback)
+            }
         }
     }
 
-    private fun clearSuggestions() {
+    private fun cleanup(callback: ConnectivityManager.NetworkCallback) {
         try {
-            val emptySuggestions = wifiManager.networkSuggestions
-            if (emptySuggestions.isNotEmpty()) {
-                wifiManager.removeNetworkSuggestions(emptySuggestions)
-            }
+            connectivityManager.unregisterNetworkCallback(callback)
         } catch (_: Exception) {}
+    }
+
+    private fun disconnectNetwork() {
+        currentCallback?.let { cleanup(it) }
+        currentCallback = null
     }
 
     fun cancel() {
         isCancelled = true
-        clearSuggestions()
-        currentCallback?.let {
-            try {
-                connectivityManager.unregisterNetworkCallback(it)
-            } catch (_: Exception) {}
-        }
-        currentCallback = null
+        disconnectNetwork()
     }
 }
