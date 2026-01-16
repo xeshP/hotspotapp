@@ -24,7 +24,7 @@ sealed class TestResult {
 class PasswordTester(private val context: Context) {
 
     companion object {
-        private const val CONNECTION_TIMEOUT_MS = 30000L // 30 sec - user needs to tap
+        private const val CONNECTION_TIMEOUT_MS = 4000L // 4 sec fast mode
     }
 
     private val connectivityManager: ConnectivityManager =
