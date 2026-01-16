@@ -20,14 +20,14 @@ sealed class TestResult {
 class PasswordTester(private val context: Context) {
 
     companion object {
-        private const val CONNECTION_TIMEOUT_MS = 4000L // 4 seconds per attempt
+        private const val CONNECTION_TIMEOUT_MS = 2000L // 2 seconds - aggressive
     }
 
     private val connectivityManager: ConnectivityManager =
         context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
     private var currentCallback: ConnectivityManager.NetworkCallback? = null
-    private var isCancelled = false
+    @Volatile private var isCancelled = false
 
     suspend fun testPasswords(
         network: WifiNetwork,
@@ -56,9 +56,6 @@ class PasswordTester(private val context: Context) {
                 }
                 return@withContext
             }
-
-            // Small delay between attempts to avoid rate limiting
-            delay(100)
         }
 
         if (!isCancelled) {
@@ -74,10 +71,8 @@ class PasswordTester(private val context: Context) {
         val specifierBuilder = WifiNetworkSpecifier.Builder()
             .setSsid(ssid)
 
-        // Set password based on security type
         when {
             securityType.contains("WPA3") -> specifierBuilder.setWpa3Passphrase(password)
-            securityType.contains("WPA2") || securityType.contains("WPA") -> specifierBuilder.setWpa2Passphrase(password)
             else -> specifierBuilder.setWpa2Passphrase(password)
         }
 
@@ -88,15 +83,13 @@ class PasswordTester(private val context: Context) {
             .build()
 
         val handler = Handler(Looper.getMainLooper())
-        var isResumed = false
+        @Volatile var isResumed = false
 
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 if (!isResumed) {
                     isResumed = true
-                    try {
-                        connectivityManager.unregisterNetworkCallback(this)
-                    } catch (_: Exception) {}
+                    cleanup(this)
                     continuation.resume(true) {}
                 }
             }
@@ -104,9 +97,7 @@ class PasswordTester(private val context: Context) {
             override fun onUnavailable() {
                 if (!isResumed) {
                     isResumed = true
-                    try {
-                        connectivityManager.unregisterNetworkCallback(this)
-                    } catch (_: Exception) {}
+                    cleanup(this)
                     continuation.resume(false) {}
                 }
             }
@@ -114,9 +105,7 @@ class PasswordTester(private val context: Context) {
             override fun onLost(network: Network) {
                 if (!isResumed) {
                     isResumed = true
-                    try {
-                        connectivityManager.unregisterNetworkCallback(this)
-                    } catch (_: Exception) {}
+                    cleanup(this)
                     continuation.resume(false) {}
                 }
             }
@@ -124,13 +113,10 @@ class PasswordTester(private val context: Context) {
 
         currentCallback = callback
 
-        // Faster timeout
         handler.postDelayed({
             if (!isResumed) {
                 isResumed = true
-                try {
-                    connectivityManager.unregisterNetworkCallback(callback)
-                } catch (_: Exception) {}
+                cleanup(callback)
                 continuation.resume(false) {}
             }
         }, CONNECTION_TIMEOUT_MS)
@@ -146,20 +132,20 @@ class PasswordTester(private val context: Context) {
 
         continuation.invokeOnCancellation {
             if (!isResumed) {
-                try {
-                    connectivityManager.unregisterNetworkCallback(callback)
-                } catch (_: Exception) {}
+                cleanup(callback)
             }
         }
     }
 
+    private fun cleanup(callback: ConnectivityManager.NetworkCallback) {
+        try {
+            connectivityManager.unregisterNetworkCallback(callback)
+        } catch (_: Exception) {}
+    }
+
     fun cancel() {
         isCancelled = true
-        currentCallback?.let {
-            try {
-                connectivityManager.unregisterNetworkCallback(it)
-            } catch (_: Exception) {}
-        }
+        currentCallback?.let { cleanup(it) }
         currentCallback = null
     }
 }
