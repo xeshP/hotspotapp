@@ -53,7 +53,6 @@ class MainActivity : AppCompatActivity() {
         initComponents()
         setupRecyclerView()
         setupClickListeners()
-        checkPermissionAndScan()
     }
 
     private fun initComponents() {
