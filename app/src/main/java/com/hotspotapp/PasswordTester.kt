@@ -19,7 +19,6 @@ sealed class TestResult {
     data class Progress(val currentPassword: String, val index: Int, val total: Int) : TestResult()
     object Failed : TestResult()
     object Cancelled : TestResult()
-    object WaitingForUser : TestResult()
 }
 
 class PasswordTester(private val context: Context) {
